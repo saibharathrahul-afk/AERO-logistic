@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+
+# Environment secrets
+.env
+.env.*
+!.env.example
+
+# Local DB / runtime
+*.db
+*.sqlite3
+airpower.auditkey
+
+# Editors
+.vscode/
+.DS_Store
