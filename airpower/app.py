@@ -5,18 +5,68 @@ import time
 from typing import Annotated
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .core import AIRCRAFT, PARTS, TASKS, apply_whatif, assess, diff_plans, modify_plan, risk_14_day, solve, spare_position_14d, verify
-from .persistence import DB, LOCK, _mac, auth, locked, log, report_html
+from .persistence import DB, LOCK, COOKIE_SECURE, SESSION_TTL_SECONDS, _clear_session, _generate_session, _mac, auth, get_session, locked, log, require_csrf, report_html, validate_owner
 from .ui import HTML
 
 load_dotenv()
 
 app = FastAPI(title="Air Power Decision Support")
+
+
+@app.post("/api/login")
+def login(request: Request, payload: dict | None = None):
+    data = payload or {}
+    username = str(data.get("username", "")).strip()
+    password = str(data.get("password", "")).strip()
+    if not validate_owner(username, password):
+        raise HTTPException(401, "Invalid username or password")
+
+    session_token, csrf = _generate_session(username)
+    response = JSONResponse({"username": username, "csrf_token": csrf, "logged_in": True})
+    response.set_cookie(
+        key="aerotwin_session",
+        value=session_token,
+        httponly=True,
+        samesite="lax",
+        secure=COOKIE_SECURE,
+        max_age=SESSION_TTL_SECONDS,
+        path="/",
+    )
+    response.set_cookie(
+        key="x-csrf-token",
+        value=csrf,
+        httponly=False,
+        samesite="lax",
+        secure=COOKIE_SECURE,
+        max_age=SESSION_TTL_SECONDS,
+        path="/",
+    )
+    response.headers["X-CSRF-Token"] = csrf
+    return response
+
+
+@app.get("/api/session")
+def session_status(request: Request):
+    session = get_session(request)
+    if not session:
+        raise HTTPException(401, "Authentication required")
+    return {"username": session["username"], "csrf_token": session["csrf"], "expires_at": session["expires_at"]}
+
+
+@app.post("/api/logout")
+def logout(request: Request):
+    if get_session(request):
+        _clear_session(request)
+    response = JSONResponse({"logged_out": True})
+    response.set_cookie(key="aerotwin_session", value="", max_age=0, path="/", httponly=True, samesite="lax", secure=COOKIE_SECURE)
+    response.set_cookie(key="x-csrf-token", value="", max_age=0, path="/", samesite="lax", secure=COOKIE_SECURE)
+    return response
 
 
 def _split_csv(value: str | None) -> list[str]:
@@ -32,6 +82,7 @@ allowed_origins = _split_csv(os.getenv("ALLOWED_ORIGINS")) or [
     "http://127.0.0.1:8000",
     "https://lillyboy-aero-logistics.hf.space",
     "https://huggingface.co",
+    "https://aerotwin-frontend.vercel.app",
 ]
 
 app.add_middleware(
@@ -74,17 +125,20 @@ def fleet(user=Depends(auth())):
 
 
 @app.post("/api/risk")
-def risk(request: Req, user=Depends(auth())):
+def risk(request: Req, user=Depends(auth()), request_obj: Request = None):
+    require_csrf(request_obj)
     return assess(apply_whatif(request.stock, request.delay))
 
 
 @app.post("/api/parts")
-def parts_(request: Req, user=Depends(auth())):
+def parts_(request: Req, user=Depends(auth()), request_obj: Request = None):
+    require_csrf(request_obj)
     return apply_whatif(request.stock, request.delay)
 
 
 @app.post("/api/optimize")
-def optimize(request: Req, user=Depends(auth())):
+def optimize(request: Req, user=Depends(auth()), request_obj: Request = None):
+    require_csrf(request_obj)
     plan = solve(apply_whatif(request.stock, request.delay), request.disable)
     with LOCK:
         plan["id"] = f"P{DB.execute('SELECT COUNT(*) FROM plans').fetchone()[0]+1}"
@@ -98,7 +152,8 @@ def optimize(request: Req, user=Depends(auth())):
 
 
 @app.post("/api/compare")
-def compare(request: CmpReq, user=Depends(auth())):
+def compare(request: CmpReq, user=Depends(auth()), request_obj: Request = None):
+    require_csrf(request_obj)
     base, alternative = (solve(apply_whatif(item.stock, item.delay), item.disable)
                          for item in (request.base, request.alt))
     return {"base": base, "alt": alternative, "diff": diff_plans(base, alternative)}
@@ -106,7 +161,8 @@ def compare(request: CmpReq, user=Depends(auth())):
 
 @app.post("/api/plans/{pid}/decide")
 @locked
-def decide(pid: str, decision: str, user=Depends(auth("maint_officer", "commander"))):
+def decide(pid: str, decision: str, user=Depends(auth("maint_officer", "commander")), request_obj: Request = None):
+    require_csrf(request_obj)
     row = DB.execute("SELECT body,decision FROM plans WHERE id=?", (pid,)).fetchone()
     if not row or decision not in ("APPROVED", "REJECTED"):
         raise HTTPException(400, "bad request (use /modify to change a plan)")
@@ -131,7 +187,8 @@ def decide(pid: str, decision: str, user=Depends(auth("maint_officer", "commande
 
 @app.post("/api/plans/{pid}/modify")
 @locked
-def modify_endpoint(pid: str, request: ModReq, user=Depends(auth("maint_officer", "commander"))):
+def modify_endpoint(pid: str, request: ModReq, user=Depends(auth("maint_officer", "commander")), request_obj: Request = None):
+    require_csrf(request_obj)
     row = DB.execute("SELECT body,decision FROM plans WHERE id=?", (pid,)).fetchone()
     if not row:
         raise HTTPException(404, "no such plan")

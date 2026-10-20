@@ -11,7 +11,7 @@ import threading
 import time
 from pathlib import Path
 
-from fastapi import Header, HTTPException
+from fastapi import HTTPException, Request
 
 TESTING = os.environ.get("AIRPOWER_TESTING") == "1"
 LOCK = threading.RLock()
@@ -52,19 +52,101 @@ def _key_hash(key):
     return hashlib.sha256(key.encode()).hexdigest()
 
 
+def _owner_credentials():
+    username = os.environ.get("AIRPOWER_OWNER_USERNAME", "").strip()
+    password = os.environ.get("AIRPOWER_OWNER_PASSWORD", "").strip()
+    if not username or not password:
+        raise RuntimeError("AIRPOWER_OWNER_USERNAME and AIRPOWER_OWNER_PASSWORD must be configured for production auth.")
+    return username, password
+
+
+OWNER_USERNAME, OWNER_PASSWORD = _owner_credentials()
+SESSION_SECRET = os.environ.get("AIRPOWER_SESSION_SECRET", "").strip()
+if not SESSION_SECRET:
+    raise RuntimeError("AIRPOWER_SESSION_SECRET must be configured for secure session cookies.")
+SESSION_TTL_SECONDS = max(1, int(os.environ.get("AIRPOWER_SESSION_TTL_SECONDS", "1800")))
+COOKIE_SECURE = os.environ.get("AIRPOWER_COOKIE_SECURE", "false").lower() in {"1", "true", "yes", "on"}
+SESSION_STORE = {}
+
+
+def _is_session_expired(session):
+    return session.get("expires_at", 0) <= time.time()
+
+
+def _prune_sessions():
+    expired = [token for token, session in SESSION_STORE.items() if _is_session_expired(session)]
+    for token in expired:
+        del SESSION_STORE[token]
+
+
+def _csrf_token():
+    return secrets.token_urlsafe(32)
+
+
+def _generate_session(username):
+    _prune_sessions()
+    session_token = secrets.token_urlsafe(32)
+    csrf = _csrf_token()
+    SESSION_STORE[session_token] = {
+        "username": username,
+        "csrf": csrf,
+        "expires_at": time.time() + SESSION_TTL_SECONDS,
+    }
+    return session_token, csrf
+
+
+def _clear_session(request: Request):
+    token = request.cookies.get("aerotwin_session")
+    if token:
+        SESSION_STORE.pop(token, None)
+
+
+def get_session(request: Request):
+    _prune_sessions()
+    token = request.cookies.get("aerotwin_session")
+    if not token:
+        return None
+    session = SESSION_STORE.get(token)
+    if not session or _is_session_expired(session):
+        SESSION_STORE.pop(token, None)
+        return None
+    return session
+
+
+def validate_owner(username: str, password: str):
+    return username == OWNER_USERNAME and password == OWNER_PASSWORD
+
+
+def require_session(request: Request, *roles):
+    session = get_session(request)
+    if not session:
+        raise HTTPException(401, "Authentication required")
+    if roles and session["username"] not in roles:
+        raise HTTPException(403, "Forbidden")
+    return session
+
+
+def require_csrf(request: Request):
+    if request.method.upper() not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return
+    session = get_session(request)
+    if not session:
+        raise HTTPException(401, "Authentication required")
+    expected = session.get("csrf")
+    supplied = request.headers.get("x-csrf-token") or request.headers.get("X-CSRF-Token")
+    if not expected or not supplied or not hmac.compare_digest(expected, supplied):
+        raise HTTPException(403, "CSRF validation failed")
+
+
+def auth(*roles):
+    def dependency(request: Request):
+        session = require_session(request, *roles)
+        return (session["username"], session["username"])
+    return dependency
+
+
 def _load_users():
-    raw = os.environ.get("AIRPOWER_USERS")
-    if raw:
-        source = json.loads(raw)
-    else:
-        source = {
-            "demo-analyst": ["analyst", "analyst"],
-            "demo-officer": ["maint_officer", "maint_officer"],
-            "demo-commander": ["commander", "commander"],
-        }
-        if not TESTING:
-            print("WARNING: using DEMO API keys. Set AIRPOWER_USERS for anything beyond a demo.")
-    return {_key_hash(key): tuple(value) for key, value in source.items()}
+    return {OWNER_USERNAME: (OWNER_USERNAME, OWNER_USERNAME)}
 
 
 USERS = _load_users()
@@ -90,17 +172,6 @@ def locked(function):
         with LOCK:
             return function(*args, **kwargs)
     return wrapper
-
-
-def auth(*roles):
-    def dependency(x_api_key: str = Header(default="")):
-        user = USERS.get(_key_hash(x_api_key))
-        if not user:
-            raise HTTPException(401, "Missing/invalid API key")
-        if roles and user[1] not in roles:
-            raise HTTPException(403, f"Role '{user[1]}' may not do this")
-        return user
-    return dependency
 
 
 def report_html(plan_id):
