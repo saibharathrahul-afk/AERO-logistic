@@ -70,6 +70,13 @@ def logout(request: Request):
     return response
 
 
+def optional_auth(request: Request):
+    session = get_session(request)
+    if not session:
+        return None
+    return (session["username"], session["username"])
+
+
 def _split_csv(value: str | None) -> list[str]:
     if not value:
         return []
@@ -121,7 +128,7 @@ class ModReq(BaseModel):
 
 
 @app.get("/api/fleet")
-def fleet(user=Depends(auth())):
+def fleet(user=Depends(optional_auth)):
     return {"aircraft": AIRCRAFT, "tasks": TASKS}
 
 
@@ -224,7 +231,7 @@ def health():
 
 @app.get("/api/plans")
 @locked
-def plans_list(user=Depends(auth())):
+def plans_list(user=Depends(optional_auth)):
     output = []
     for plan_id, body, decision, decided_by, timestamp in DB.execute(
             "SELECT id,body,decision,decided_by,ts FROM plans ORDER BY rowid DESC LIMIT 100"):
@@ -237,7 +244,7 @@ def plans_list(user=Depends(auth())):
 
 @app.get("/api/plans/{pid}")
 @locked
-def plan_get(pid: str, user=Depends(auth())):
+def plan_get(pid: str, user=Depends(optional_auth)):
     row = DB.execute("SELECT body FROM plans WHERE id=?", (pid,)).fetchone()
     if not row:
         raise HTTPException(404, "no such plan")
@@ -266,7 +273,7 @@ def audit_verify(user=Depends(auth())):
 
 @app.get("/api/v1/spares/position")
 @locked
-def spares_position(part: str | None = None, horizon: int = Query(default=14, ge=0, le=30), user=Depends(auth())):
+def spares_position(part: str | None = None, horizon: int = Query(default=14, ge=0, le=30), user=Depends(optional_auth)):
     data = spare_position_14d(parts=PARTS, tasks=TASKS, horizon=horizon)
     if part is None:
         return data
@@ -277,7 +284,7 @@ def spares_position(part: str | None = None, horizon: int = Query(default=14, ge
 
 @app.get("/api/v1/risk/14-day")
 @locked
-def risk_14_day_api(part: str | None = None, horizon: int = Query(default=14, ge=0, le=30), user=Depends(auth())):
+def risk_14_day_api(part: str | None = None, horizon: int = Query(default=14, ge=0, le=30), user=Depends(optional_auth)):
     try:
         return risk_14_day(parts=PARTS, tasks=TASKS, horizon=horizon, part=part)
     except KeyError as error:

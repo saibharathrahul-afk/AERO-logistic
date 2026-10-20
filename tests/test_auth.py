@@ -26,8 +26,14 @@ def client(monkeypatch):
     os.environ.pop("AIRPOWER_SESSION_TTL_SECONDS", None)
 
 
+def test_public_dashboard_reads_remain_available_without_login(client):
+    for path in ['/api/fleet', '/api/v1/spares/position', '/api/v1/risk/14-day']:
+        resp = client.get(path)
+        assert resp.status_code == 200, f'{path} should be public for dashboard reads: {resp.text}'
+
+
 def test_unauthenticated_access_is_rejected(client):
-    resp = client.get('/api/fleet')
+    resp = client.post('/api/parts', json={'stock': {}, 'delay': {}, 'disable': []})
     assert resp.status_code == 401
     body = resp.json()
     assert body['detail'] in {'Authentication required', 'Missing/invalid API key'}
@@ -52,7 +58,8 @@ def test_logout_invalidates_session(client):
     csrf = client.get('/api/session').json()['csrf_token']
     resp = client.post('/api/logout', headers={'X-CSRF-Token': csrf})
     assert resp.status_code == 200, resp.text
-    assert client.get('/api/fleet').status_code == 401
+    protected = client.post('/api/parts', json={'stock': {}, 'delay': {}, 'disable': []})
+    assert protected.status_code == 401
 
 
 def test_session_expires(client, monkeypatch):
@@ -67,7 +74,7 @@ def test_session_expires(client, monkeypatch):
     assert login.status_code == 200, login.text
     csrf = login.json()['csrf_token']
     time.sleep(1.5)
-    resp = client.get('/api/fleet', headers={'X-CSRF-Token': csrf})
+    resp = client.post('/api/parts', json={'stock': {}, 'delay': {}, 'disable': []}, headers={'X-CSRF-Token': csrf})
     assert resp.status_code == 401, resp.text
 
 
