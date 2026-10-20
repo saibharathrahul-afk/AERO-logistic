@@ -5,6 +5,9 @@ import time
 from typing import Annotated
 
 from dotenv import load_dotenv
+
+load_dotenv()
+
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -13,8 +16,6 @@ from pydantic import BaseModel, Field, field_validator
 from .core import AIRCRAFT, PARTS, TASKS, apply_whatif, assess, diff_plans, modify_plan, risk_14_day, solve, spare_position_14d, verify
 from .persistence import DB, LOCK, COOKIE_SECURE, SESSION_TTL_SECONDS, _clear_session, _generate_session, _mac, auth, get_session, locked, log, require_csrf, report_html, validate_owner
 from .ui import HTML
-
-load_dotenv()
 
 app = FastAPI(title="Air Power Decision Support")
 
